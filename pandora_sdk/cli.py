@@ -82,7 +82,11 @@ def _watch(gloves: Source, args: argparse.Namespace) -> int:
         except TimeoutError:
             message = None
         if isinstance(gloves, Local):
-            for device in sorted(gloves.unprofiled - named):
+            # A glove reading its own profile is not short of one yet.
+            settled = {device for device in gloves.unprofiled
+                       if gloves.glove_profile_status(device) is not None
+                       or not args.glove_profiles}
+            for device in sorted(settled - named):
                 named.add(device)
                 print(f"pandora: {_unprofiled(device, args)}. Make one with: pandora calibrate "
                       f"--device {device} --hand left|right", file=sys.stderr)
@@ -99,7 +103,8 @@ def _unprofiled(device: str, args: argparse.Namespace) -> str:
     if not args.raw:
         # Left out, which looks like silence.
         return (f"{device} is sending but is left out of the frames: a frame needs the "
-                "glove's profile, and it has none (--raw shows its raw readings without one)")
+                "glove's profile, and it has none, neither here nor stored on the glove "
+                "(--raw shows its raw readings without one)")
     return (f"{device} has no profile, so its raw readings are shown as the {UNPROFILED_HAND} "
             "hand's (a packet does not say which hand it is)"
             + (", with no cancelled counts" if args.cancelled else ""))
@@ -108,11 +113,15 @@ def _unprofiled(device: str, args: argparse.Namespace) -> str:
 def _local(args: argparse.Namespace) -> Local:
     folder = args.profiles or default_profiles_dir()
     profiles = load_profiles(folder)
-    if not profiles and not args.raw:
+    if not profiles and not args.raw and not args.glove_profiles:
         raise PandoraError(f"no profile in {folder}, and frames need one. Make one with: "
                            "pandora calibrate --hand left|right, or watch raw readings, which "
                            "need none, with --raw")
-    return open_receiver(profiles, port=args.receiver, default_hand=UNPROFILED_HAND)
+    gloves = open_receiver(profiles, port=args.receiver, default_hand=UNPROFILED_HAND,
+                           read_glove_profiles=args.glove_profiles)
+    gloves.on_status(lambda device, _kind, message: print(f"pandora: {device}: {message}",
+                                                          file=sys.stderr, flush=True))
+    return gloves
 
 
 def _calibrate(args: argparse.Namespace) -> int:
@@ -165,7 +174,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     watch.add_argument("--count", type=int, default=0, help="stop after this many lines")
     watch.add_argument("--local", action="store_true",
                        help="read the receiver itself, with no app, using the profiles "
-                            "`pandora calibrate` wrote (--raw needs none)")
+                            "`pandora calibrate` wrote, else the one each glove stores "
+                            "(--raw needs none)")
+    watch.add_argument("--no-glove-profiles", dest="glove_profiles", action="store_false",
+                       help="with --local: do not read the profile a glove stores itself")
     watch.add_argument("--profiles", type=Path, metavar="DIR",
                        help=f"with --local: the profiles folder (default "
                             f"{default_profiles_dir()})")

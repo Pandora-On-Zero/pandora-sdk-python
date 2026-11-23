@@ -2,7 +2,7 @@
 receiver for what it does with no app."""
 import threading
 
-from fakelink import Link, packet_line
+from fakelink import Link, StoringGlove, packet_line
 from standin import frame, raw, raw_cancelled
 
 import pandora_sdk
@@ -114,7 +114,7 @@ def test_calibrate_writes_the_profile_watch_local_then_shows_hands_from(
 
 def test_watch_local_frames_with_no_profile_at_all_says_to_calibrate(tmp_path, capsys):
     """Frames need a profile; raw readings do not, which it says too."""
-    code = main(["watch", "--local", "--profiles", str(tmp_path / "none")])
+    code = main(["watch", "--local", "--no-glove-profiles", "--profiles", str(tmp_path / "none")])
 
     captured = capsys.readouterr()
     assert code == 1
@@ -131,8 +131,8 @@ def test_watch_local_raw_runs_with_no_profile_at_all(monkeypatch, tmp_path, caps
     threading.Timer(0.5, lambda: link.feed(
         *[packet_line(RIGHT, ms) for ms in range(0, 30, 10)])).start()
 
-    code = main(["watch", "--local", "--raw", "--profiles", str(tmp_path / "none"),
-                 "--receiver", "COM7", "--rate", "0", "--count", "2"])
+    code = main(["watch", "--local", "--no-glove-profiles", "--raw", "--profiles",
+                 str(tmp_path / "none"), "--receiver", "COM7", "--rate", "0", "--count", "2"])
 
     captured = capsys.readouterr()
     lines = captured.out.splitlines()
@@ -152,10 +152,32 @@ def test_watch_local_names_a_glove_left_out_of_the_frames(monkeypatch, tmp_path,
     plugged_in(monkeypatch, link)
     threading.Timer(1.5, lambda: link.feed(packet_line(LEFT))).start()
 
-    code = main(["watch", "--local", "--profiles", str(tmp_path), "--receiver", "COM7",
-                 "--count", "1"])
+    code = main(["watch", "--local", "--no-glove-profiles", "--profiles", str(tmp_path),
+                 "--receiver", "COM7", "--count", "1"])
 
     captured = capsys.readouterr()
     assert code == 0 and captured.out.startswith(f"left   {LEFT}  #1  ")
     assert f"{RIGHT} is sending but is left out of the frames" in captured.err
     assert f"pandora calibrate --device {RIGHT}" in captured.err
+
+
+def test_watch_local_shows_the_hands_of_a_glove_with_only_its_own_profile(
+        monkeypatch, tmp_path, capsys):
+    """Set up in the 01 Glove app and never calibrated here: with no profile
+    file at all, its frames come from the profile it stores, which it says."""
+    link = StoringGlove(hand=1)
+    plugged_in(monkeypatch, link)
+    # Its first packet starts the profile read; the glove streams on, and the
+    # packets after the read make frames.
+    threading.Timer(0.5, lambda: link.feed(packet_line(RIGHT, 0))).start()
+    threading.Timer(1.0, lambda: link.feed(
+        *[packet_line(RIGHT, ms) for ms in range(10, 50, 10)])).start()
+
+    code = main(["watch", "--local", "--profiles", str(tmp_path / "none"),
+                 "--receiver", "COM7", "--rate", "0", "--count", "2"])
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert captured.out.splitlines()[0].startswith(f"right  {RIGHT}  #")
+    assert f"pandora: {RIGHT}: using the profile the glove stores: right hand" in captured.err
+    assert "has no profile" not in captured.err and "left out" not in captured.err

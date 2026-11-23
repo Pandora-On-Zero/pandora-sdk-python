@@ -5,7 +5,8 @@ import threading
 import time
 from typing import List, Tuple
 
-from pandora_core_rs.packet_layout import TRACKING_FORMAT
+from pandora_core_rs.packet_layout import (GLOVE_PKT_STORE, GLOVE_STORE_OP_MANIFEST,
+                                           STORE_RSP_FORMAT, TRACKING_FORMAT)
 from pandora_core_rs.serial_framing import decode_frame, encode_frame
 
 
@@ -66,3 +67,33 @@ def sent(link: Link, kind: int, layout: str) -> List[Tuple]:
     payloads = [decode_frame(line) for line in link.written]
     return [struct.unpack(layout, payload) for payload in payloads
             if payload is not None and payload[0] == kind]
+
+
+class StoringGlove(Link):
+    """A made-up receiver whose gloves answer the profile store's manifest
+    (shared/packet_types.h GLOVE_PKT_STORE), as a glove the 01 Glove app set
+    up does: each stores *hand* (GLOVE_HAND_*: 0 left, 1 right) and no
+    calibration sections, so its profile reads in one reply."""
+
+    def __init__(self, hand: int = 0) -> None:
+        super().__init__()
+        self.hand = hand
+
+    def write(self, data: bytes) -> int:
+        written = super().write(data)
+        text = bytes(data).decode("ascii", errors="replace").strip()
+        if text.startswith("DFU:GLOVETX:"):
+            device, hexed = text[len("DFU:GLOVETX:"):].split(":")
+            request = bytes.fromhex(hexed)
+            op, seq = request[1], request[2]
+            if op == GLOVE_STORE_OP_MANIFEST:
+                body = bytes([1, 0, self.hand, 0])  # format 1, hand, no sections
+                self.feed(encode_frame(struct.pack(
+                    STORE_RSP_FORMAT, GLOVE_PKT_STORE, device.encode().ljust(16, b"\0"),
+                    op, seq, 0, 0, 0, 0, 0, len(body)) + body))
+        return written
+
+
+def store_requests(link: Link) -> List[bytes]:
+    """The profile-store requests written to *link* (DFU:GLOVETX lines)."""
+    return [line for line in link.written if line.startswith(b"DFU:GLOVETX:")]

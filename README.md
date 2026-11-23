@@ -343,6 +343,19 @@ your process. Everything after that line is the same as with `connect()`:
 [the receiver's text lines and damaged frames](#the-receivers-own-lines-and-damaged-frames)
 (`on_line`, `bad_frames`), and gloves with no profile read raw only.
 
+A glove's profile comes from a `pandora calibrate` file when there is one for it, else
+from the glove itself: the hand and calibration the 01 Glove app stores in its flash,
+read when it starts sending (a moment, during which it is read as a glove with no
+profile). `read_glove_profiles=False` turns that off. `on_status()` tells you how it went,
+and also names a glove whose packets this SDK cannot read (its firmware and this SDK's
+pandora-core-rs do not match; `Local.incompatible`):
+
+```python
+gloves = pandora_sdk.open_receiver()
+gloves.on_status(lambda device, kind, message: print(device, message))
+# NRF_GLOVE_E5D1 using the profile the glove stores: right hand, CURL, EARTH
+```
+
 ```python
 with pandora_sdk.open_receiver() as gloves:
     gloves.subscribe(hands=["right"], rate_hz=50, bones=False)

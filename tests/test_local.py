@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-from fakelink import Link, packet_line, sent
+from fakelink import Link, StoringGlove, packet_line, sent, store_requests
 from standin import wait
 
 import pandora_sdk
@@ -22,7 +22,7 @@ from pandora_core_rs.packet_layout import (
     HALL_DEFAULT_ODR, HALL_DEFAULT_OSR, HALL_RANGE_5MT, HALL_RANGE_50MT, HALL_TARGET_ALL,
     USB_HALL_CONFIG_FORMAT, USB_HAPTIC_ROM_FORMAT, USB_HAPTIC_RTP_FORMAT,
 )
-from pandora_core_rs.serial_framing import encode_frame
+from pandora_core_rs.serial_framing import decode_frame, encode_frame
 from pandora_sdk import Device, Subscription
 
 RIGHT, LEFT, STRANGER = "NRF_GLOVE_E5D1", "NRF_GLOVE_A48D", "NRF_GLOVE_0000"
@@ -1238,3 +1238,97 @@ def test_an_on_line_callback_that_raises_ends_the_source_with_its_error(link, gl
     error = gloves.end_error
     assert error is not None and error.code == "callback_failed"
     assert isinstance(error.__cause__, ValueError) and "bad line" in str(error)
+
+
+# ── the profile a glove stores itself ────────────────────────────────────────
+
+def statuses_of(gloves):
+    """Every (device, kind, message) given to on_status from now on."""
+    told = []
+    gloves.on_status(lambda device, kind, message: told.append((device, kind, message)))
+    return told
+
+
+def test_a_glove_with_no_profile_given_runs_on_the_one_it_stores(clock):
+    """As the 01 Glove app left it: its hand (here left) and calibration."""
+    link = StoringGlove(hand=0)
+    with pandora_sdk.Local({}, link=link, defaults={}, clock=clock) as gloves:
+        told = statuses_of(gloves)
+        gloves.subscribe(bones=False)
+        feed(link, gloves, packet_line(STRANGER))
+        assert wait(lambda: gloves.glove_profile_status(STRANGER) == "profile_loaded")
+
+        feed(link, gloves, packet_line(STRANGER, glove_ms=2000))
+        hand = gloves.read(timeout=2.0)
+
+        assert (hand.device, hand.hand) == (STRANGER, "left")
+        assert gloves.unprofiled == set() and gloves.uses_glove_profile(STRANGER)
+        assert gloves.devices() == [Device(STRANGER, "left", "", True)]
+        assert [(device, kind) for device, kind, _ in told] == [(STRANGER, "profile_loaded")]
+        assert "left hand" in told[0][2]
+    assert len(store_requests(link)) == 1  # the manifest; a glove with no sections needs no read
+
+
+def test_a_profile_given_wins_and_the_glove_is_not_asked(clock):
+    link = StoringGlove(hand=0)
+    with pandora_sdk.Local(PROFILES, link=link, defaults={}, clock=clock) as gloves:
+        feed(link, gloves, packet_line(RIGHT))
+
+        assert gloves.devices() == [Device(RIGHT, "right", "Lab right", True)]
+        assert not gloves.uses_glove_profile(RIGHT)
+        assert gloves.glove_profile_status(RIGHT) is None
+    assert store_requests(link) == []
+
+
+def test_reading_the_gloves_own_profiles_can_be_switched_off(clock):
+    link = StoringGlove(hand=0)
+    with pandora_sdk.Local({}, link=link, defaults={}, clock=clock,
+                           read_glove_profiles=False) as gloves:
+        feed(link, gloves, packet_line(STRANGER))
+
+        assert gloves.unprofiled == {STRANGER}
+    assert store_requests(link) == []
+
+
+def test_a_glove_that_never_answers_the_store_is_read_as_one_with_no_profile(link, clock):
+    """Older firmware: no profile store. Until the probes give up it is
+    simply unprofiled, read raw as the default hand, as before."""
+    with pandora_sdk.Local({}, link=link, defaults={}, clock=clock) as gloves:
+        gloves.subscribe("raw")
+        feed(link, gloves, packet_line(STRANGER))
+
+        assert gloves.read("raw", timeout=2.0).hand == "right"
+        assert gloves.unprofiled == {STRANGER}
+        assert gloves.glove_profile_status(STRANGER) is None  # still being probed
+    assert len(store_requests(link)) == 1
+
+
+def test_packets_from_firmware_this_sdk_cannot_read_are_reported_and_left_out(link, gloves):
+    told = statuses_of(gloves)
+    gloves.subscribe("raw")
+    newer = decode_frame(packet_line(RIGHT))[:120]  # a tracking packet of another size
+
+    link.feed(encode_frame(newer), encode_frame(newer))
+    feed(link, gloves, packet_line(LEFT))
+
+    assert gloves.read("raw", timeout=2.0).device == LEFT
+    assert wait(lambda: RIGHT in gloves.incompatible)
+    assert "120-byte" in gloves.incompatible[RIGHT]
+    assert [(device, kind) for device, kind, _ in told] == [(RIGHT, "incompatible_firmware")]
+    assert gloves.bad_frames == 0
+
+
+def test_a_status_callback_that_raises_ends_the_source_with_its_error(link, clock):
+    link_ = StoringGlove(hand=0)
+    with pandora_sdk.Local({}, link=link_, defaults={}, clock=clock) as gloves:
+        def _broken(*_status):
+            raise ValueError("no such glove")
+
+        gloves.on_status(_broken)
+        link_.feed(packet_line(STRANGER))
+
+        with pytest.raises(pandora_sdk.Disconnected) as lost:
+            gloves.read(timeout=2.0)
+
+    assert lost.value.code == "callback_failed"
+    assert isinstance(lost.value.__cause__, ValueError)
