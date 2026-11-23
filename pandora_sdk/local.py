@@ -53,7 +53,7 @@ import re
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Set, Union
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Set, Tuple, Union
 
 from pandora_core_rs import protocol, receiver, runtime
 from pandora_core_rs.glove import Profile
@@ -308,7 +308,9 @@ class Local(Source):
         # Tracking packets read so far, from any glove: counted as their
         # messages are handed over, so every message of a packet counted is
         # already in latest() and the queues.
-        self.packets = 0
+        self._packets = 0
+        # Why reading ends when this object stops it (stop_reading()), not close().
+        self._stopped_why: Optional[Tuple[str, str]] = None
         # The function given each receiver text line (on_line()).
         self._on_line: Optional[Callable[[str], object]] = None
         # The function given each glove status (on_status()), and how each
@@ -331,6 +333,19 @@ class Local(Source):
         self._reader = threading.Thread(target=self._take_messages, name="pandora-sdk-receiver",
                                         daemon=True)
         self._reader.start()
+
+    @property
+    def packets(self) -> int:
+        """Tracking packets read so far, from any glove; every message of a
+        packet counted is already in latest() and the queues."""
+        with self._changed:
+            return self._packets
+
+    def _dropped_before(self) -> int:
+        """What the runtime dropped, oldest first, because this object's
+        thread did not take it in time (it holds 4096 messages): nonzero only
+        when callbacks keep that thread too busy. Part of dropped."""
+        return self._native.dropped
 
     @property
     def unprofiled(self) -> Set[str]:
@@ -410,6 +425,11 @@ class Local(Source):
         """As Client.play_rtp, with every command going as given (play_rom)."""
         _answered(self._native.play_rtp, device, list(amplitudes), list(durations_ms))
 
+    def stop_haptics(self, device: str, timeout: Optional[float] = None) -> None:
+        """Stop every motor of *device* at once (an all-zero RTP frame), as
+        the C and C++ SDK's stop_haptics, from the same code."""
+        _answered(self._native.stop_haptics, device)
+
     def set_hall_range(self, device: str, hall_range: int,
                        timeout: Optional[float] = None, *, resend: bool = True) -> str:
         """As Client.set_hall_range. Every sensor gets the range with the
@@ -482,6 +502,8 @@ class Local(Source):
                 event = native.next_event(0.1)
                 if event is None:
                     if self._stopping:
+                        if self._stopped_why is not None:
+                            why, code = self._stopped_why
                         break
                     continue
                 kind = event[0]
@@ -490,7 +512,7 @@ class Local(Source):
                     self._deliver(stream, _DECODE[stream](data))
                 elif kind == "packet":
                     with self._changed:
-                        self.packets = event[1]
+                        self._packets = event[1]
                         self._changed.notify_all()
                 elif kind == "line":
                     self._line(event[1])
@@ -536,6 +558,18 @@ class Local(Source):
         except Exception as failed:
             _log.exception("the callback for glove statuses raised")
             raise CallbackFailed(f"the callback for glove statuses raised {failed!r}") from failed
+
+    def stop_reading(self) -> None:
+        """Stop reading the receiver but keep its port open: commands
+        (play_rom(), set_hall_range(), ...) still go to the gloves, and
+        nothing more comes in. This source ends (Disconnected, code
+        "stopped"); unread messages can still be read. close() still closes
+        the port."""
+        self._stopped_why = ("reading was stopped (stop_reading())", "stopped")
+        self._stopping = True
+        self._native.stop()
+        if threading.current_thread() is not self._reader:
+            self._reader.join(timeout=2.0)
 
     def close(self) -> None:
         """Stop reading and close the port. Unread messages can still be read."""

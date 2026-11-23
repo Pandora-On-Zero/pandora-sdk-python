@@ -75,6 +75,7 @@ CONNECTION_FAILED_CODES = {
 # Disconnected.code: why a source ended.
 DISCONNECTED_CODES = {
     "closed": "close() was called",
+    "stopped": "Local.stop_reading() was called: commands still go to the gloves",
     "unplugged": "the receiver was unplugged",
     "read_failed": "reading the receiver's port failed for another reason",
     "pipeline_failed": "a glove's pipeline raised (without the app)",
@@ -113,9 +114,21 @@ class Source:
         self._lost_cause: Optional[BaseException] = None
         self._ended = False
         # Messages discarded unread because their queue was full.
-        self.dropped = 0
+        self._dropped = 0
         # Per stream, the function given each message instead of the queue (on()).
         self._callbacks: Dict[str, Callable[[Any], object]] = {}
+
+    @property
+    def dropped(self) -> int:
+        """Messages discarded unread: the oldest of a stream's queue when it
+        was full (a reader slower than the gloves), and, without the app, any
+        the runtime dropped before they reached this source."""
+        with self._changed:
+            return self._dropped + self._dropped_before()
+
+    def _dropped_before(self) -> int:
+        """Messages lost before they reached this source (Local: the runtime's queue)."""
+        return 0
 
     # ── for the thread that feeds it ─────────────────────────────────────
 
@@ -127,7 +140,7 @@ class Source:
             if callback is None:
                 unread = self._unread[stream]
                 if len(unread) == unread.maxlen:
-                    self.dropped += 1
+                    self._dropped += 1
                 unread.append(message)
             self._latest[stream][message.device] = message
             self._changed.notify_all()
@@ -291,9 +304,13 @@ class Source:
         each frame with a duration longer than the gap to the next."""
         raise NotImplementedError
 
-    def stop(self, device: str, timeout: Optional[float] = None) -> None:
+    def stop_haptics(self, device: str, timeout: Optional[float] = None) -> None:
         """Stop every motor of *device* at once: an all-zero RTP frame."""
         self.play_rtp(device, [0] * HAPTIC_MOTOR_COUNT, [0] * HAPTIC_MOTOR_COUNT, timeout)
+
+    def stop(self, device: str, timeout: Optional[float] = None) -> None:
+        """stop_haptics(), by its first name."""
+        self.stop_haptics(device, timeout)
 
     def set_hall_range(self, device: str, hall_range: int,
                        timeout: Optional[float] = None, *, resend: bool = True) -> str:

@@ -539,11 +539,37 @@ def test_play_rtp_writes_an_amplitude_and_a_duration_per_motor(link, heard):
         (GLOVE_PKT_HAPTIC_RTP, ID, 0, 90, 90, 0, 0, 0, 300, 300, 300, 300, 300, 300)]
 
 
-def test_stop_writes_the_all_zero_frame(link, heard):
+def test_stop_haptics_writes_the_all_zero_frame_and_stop_is_its_first_name(link, heard):
+    heard.stop_haptics(RIGHT)
     heard.stop(RIGHT)
 
     assert sent(link, GLOVE_PKT_HAPTIC_RTP, USB_HAPTIC_RTP_FORMAT) == [
-        (GLOVE_PKT_HAPTIC_RTP, ID, *([0] * 12))]
+        (GLOVE_PKT_HAPTIC_RTP, ID, *([0] * 12))] * 2
+
+
+def test_stop_reading_ends_the_source_but_commands_still_go(link, heard):
+    heard.subscribe(bones=False)
+    link.feed(packet_line(RIGHT))
+    assert wait(lambda: heard.packets == 2)
+
+    heard.stop_reading()
+
+    assert heard.ended
+    assert heard.end_error is not None and heard.end_error.code == "stopped"
+    heard.play_rom(RIGHT, [0, 0, 47, 0, 0, 0])
+    assert sent(link, GLOVE_PKT_HAPTIC_ROM, USB_HAPTIC_ROM_FORMAT) == [
+        (GLOVE_PKT_HAPTIC_ROM, ID, 0, 0, 47, 0, 0, 0)]
+    link.feed(packet_line(RIGHT))
+    assert not wait(lambda: heard.packets > 2, seconds=0.3), "nothing is read any more"
+    assert heard.read(timeout=0).device == RIGHT, "what came before can still be read"
+
+
+def test_nothing_is_dropped_while_messages_are_taken(link, gloves):
+    gloves.subscribe(bones=False)
+    link.feed(*[packet_line(RIGHT, glove_ms=1000 + i) for i in range(20)])
+
+    assert wait(lambda: gloves.packets == 20)
+    assert gloves.dropped == 0
 
 
 def test_a_command_for_a_glove_not_heard_is_refused_as_the_app_refuses_it(link, heard):

@@ -3,7 +3,7 @@
 What changed in each release of pandora-sdk, newest first. Every change a program may
 notice raises the version.
 
-## 0.5.0 (2026-11-23)
+## 0.5.0 (2026-11-24)
 
 - **`open_receiver()` runs on pandora-core-rs's runtime** (`pandora_core_rs.runtime`, in
   Rust): the port, the reader thread and the gloves' pipelines are read with no Python in
@@ -21,6 +21,13 @@ notice raises the version.
 - **Firmware this SDK cannot read is reported:** a glove sending a tracking packet of
   another layout (newer or older firmware) was left out silently; now it is named in
   `Local.incompatible`, logged, and given to `on_status()` as `incompatible_firmware`.
+- **Every runtime operation, by the names C and C++ use:** `stop_haptics(glove)` stops
+  every motor (`stop(glove)` still works); `Local.stop_reading()` stops reading but keeps
+  the port open for commands (the source ends with the new `Disconnected` code
+  `stopped`); `dropped` also counts what the runtime dropped before it reached the source.
+  `tests/test_api_parity.py` fails when pandora-core-rs's runtime has an operation this
+  SDK lacks, and the tests now run on every pull request (Linux and Windows, Python 3.10
+  and 3.13).
 
 ## 0.4.1 (2026-11-13)
 

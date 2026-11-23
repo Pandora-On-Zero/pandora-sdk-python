@@ -1,0 +1,49 @@
+# The test suite on every pull request and push to main, on Linux and Windows,
+# at the oldest and newest Python this package supports, against the newest
+# pandora-core-rs pyproject.toml allows. tests/test_api_parity.py among them
+# fails when that pandora-core-rs has a runtime operation this SDK lacks.
+# Made-up receivers only: no port is opened (tests/conftest.py guards it).
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest (${{ matrix.os }}, ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.10", "3.13"]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        with:
+          version: "0.11.25"
+
+      - name: Make a venv with the package and its test extras
+        run: |
+          uv venv --python ${{ matrix.python }} .venv
+          if [ "$RUNNER_OS" = Windows ]; then PY="$PWD/.venv/Scripts/python.exe"; else PY="$PWD/.venv/bin/python"; fi
+          echo "PY=$PY" >> "$GITHUB_ENV"
+          uv pip install --python "$PY" -e ".[dev]"
+          "$PY" -c "import importlib.metadata as m; print('pandora-core-rs', m.version('pandora-core-rs'))"
+
+      - name: Tests
+        run: '"$PY" -m pytest -q -p no:cacheprovider'

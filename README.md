@@ -268,7 +268,7 @@ it; they are not held to the protocol's version. `read("debug")` and
 glove = "NRF_GLOVE_E5D1"
 gloves.play_rom(glove, [0, 47, 47, 0, 0, 0])                  # a library effect on two motors
 gloves.play_rtp(glove, [0, 0, 0, 0, 0, 90], [150] * 6)        # the back of the hand, 150 ms
-gloves.stop(glove)                                            # every motor, at once
+gloves.stop_haptics(glove)                                    # every motor, at once
 note = gloves.set_hall_range(glove, 1)                        # 0 is ±5 mT, 1 is ±50 mT
 ```
 
@@ -278,7 +278,7 @@ Motors are in the order thumb, index, middle, ring, pinky, back of the hand.
 | --- | --- |
 | `play_rom(glove, effects)` | Per motor, an effect of the motor driver's library (DRV2625, Immersion Library A), 1 to 123; 0 leaves that motor alone |
 | `play_rtp(glove, amplitudes, durations_ms)` | Per motor, 1 to 127 drives, 128 to 255 brakes, 0 stops; each held for its duration, 0 to 65535 ms (0 is the firmware's default). To stream, send each frame with a duration longer than the gap to the next |
-| `stop(glove)` | An all-zero RTP frame: every motor stops now |
+| `stop_haptics(glove)` | An all-zero RTP frame: every motor stops now (`stop(glove)` is its first name, and still works) |
 | `set_hall_range(glove, range)` | Every Hall sensor on that range; the glove's calibration is rescaled to it and raw readings say it from then on. Returns what that did to the calibration, in words |
 
 Each returns once the command went to the receiver; the glove does not answer.
@@ -441,6 +441,23 @@ print(gloves.packets, gloves.bad_frames)                  # tracking packets, da
   callback is not a stream: the lines belong to no glove, so they have no
   `latest()`, no subscription and no queue (put them on a `queue.Queue` from
   the callback if you want one).
+
+#### Stopping the reading but not the commands
+
+`gloves.stop_reading()` stops reading the receiver and keeps its port open:
+commands (`play_rom`, `set_hall_range`, ...) still reach the gloves, nothing
+more comes in, and the source ends with `Disconnected` code `stopped` (what
+was read before can still be read). `close()` still closes the port.
+
+#### The same operations from C, C++ and Rust
+
+`open_receiver()` runs on pandora-core-rs's runtime, which the C and C++ SDK
+(`pandora.h`, `pandora.hpp`, in each `core-rs-vX.Y.Z` release) and Rust
+programs call too. Every operation of it is here and there:
+pandora-core-rs's `tools/check_api_parity.py` holds Rust, C, C++ and the
+Python binding to one list, and this package's `tests/test_api_parity.py`
+holds it to the binding. A new operation fails both until every language
+has it.
 
 #### Opening the receiver yourself
 
