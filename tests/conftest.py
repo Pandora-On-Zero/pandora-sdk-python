@@ -24,13 +24,15 @@ def no_real_receiver(monkeypatch) -> None:
     """No test finds or opens a real serial port: the receiver plugged into
     this computer, and the glove behind it, stay out of reach. A test that
     wants a port patches these with a made-up one (tests/fakelink.py)."""
-    from pandora_core_rs import receiver
+    from pandora_core_rs import receiver, runtime
 
     def _refused(port, *_args, **_kwargs):
         raise AssertionError(f"a test tried to open the real port {port}")
 
     monkeypatch.setattr(receiver, "find_receivers", lambda: [])
     monkeypatch.setattr(receiver, "open_port", _refused)
+    # open_receiver() opens the port in Rust (pandora_core_rs.runtime).
+    monkeypatch.setattr(runtime, "open_port", _refused)
     # It asks the OS about the named port's driver; a made-up one has none.
     monkeypatch.setattr(receiver, "prepare_link", lambda *_args, **_kwargs: None)
 

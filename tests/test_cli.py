@@ -6,7 +6,7 @@ from fakelink import Link, packet_line
 from standin import frame, raw, raw_cancelled
 
 import pandora_sdk
-from pandora_core_rs import receiver
+from pandora_core_rs import receiver, runtime
 from pandora_sdk.cli import main
 
 RIGHT, LEFT = "NRF_GLOVE_E5D1", "NRF_GLOVE_A48D"
@@ -14,9 +14,11 @@ OPEN, FIST = 100, 900
 
 
 def plugged_in(monkeypatch, *links: Link) -> None:
-    """Each opening of the receiver's port gets the next of *links*."""
+    """Each opening of the receiver's port gets the next of *links*: by
+    open_link() (pyserial) or by open_receiver() (pandora_core_rs.runtime)."""
     waiting = iter(links)
     monkeypatch.setattr(receiver, "open_port", lambda _port, **_how: next(waiting))
+    monkeypatch.setattr(runtime, "open_port", lambda _port, **_how: next(waiting))
 
 
 def test_devices_prints_one_line_per_glove(app, capsys):

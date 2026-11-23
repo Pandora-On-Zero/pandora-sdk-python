@@ -44,7 +44,7 @@ but add `--force-reinstall` when moving: pip judges an installed package by its
 version number, not by the commit it came from, so without it pip may keep
 the `pandora-sdk` it already has. That is why this library's version goes up
 with every change a program may depend on (see [Working on it](#working-on-it)).
-This version needs `pandora-core-rs` 0.2.3 or a later 0.2.
+This version needs `pandora-core-rs` 0.3 or a later 0.3.
 
 ## Before you connect
 
@@ -333,7 +333,8 @@ gloves.send_hall_config(glove, hall_range=1, target="Index/Prox")    # one senso
 
 ### Without the app
 
-`open_receiver()` reads the receiver itself and runs each glove's pipeline in
+`open_receiver()` reads the receiver itself (through pandora-core-rs's runtime, in
+Rust, the same code the C and C++ SDK use) and runs each glove's pipeline in
 your process. Everything after that line is the same as with `connect()`:
 `subscribe`, `frames`, `raw`, `debug`, `read`, `latest`, `on`, `devices`,
 `calibration`, `latest_calibration`, the commands for a glove, `ended`,

@@ -3,6 +3,16 @@
 What changed in each release of pandora-sdk, newest first. Every change a program may
 notice raises the version.
 
+## 0.5.0 (unreleased)
+
+- **`open_receiver()` runs on pandora-core-rs's runtime** (`pandora_core_rs.runtime`, in
+  Rust): the port, the reader thread and the gloves' pipelines are read with no Python in
+  the loop, by the same code the C and C++ SDK use. The API, the messages and the error
+  codes are unchanged. Callbacks given to `on()` and `on_line()` run on the
+  `pandora-sdk-receiver` thread, as before.
+- Depends on `pandora-core-rs>=0.3,<0.4`.
+- `open_link()` and `pandora calibrate` still open the port with pyserial.
+
 ## 0.4.1 (2026-11-13)
 
 - **On PyPI:** `pip install pandora-sdk`.
