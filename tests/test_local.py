@@ -13,7 +13,7 @@ from fakelink import Link, packet_line, sent
 from standin import wait
 
 import pandora_sdk
-from pandora_core_rs import protocol, receiver
+from pandora_core_rs import protocol, receiver, runtime
 from pandora_core_rs.finger_normalizer import CurlInterpolationMode, FingerInterpolator
 from pandora_core_rs.glove import Glove
 from pandora_core_rs.packet_decoder import PacketDecoder, SensorReading
@@ -306,7 +306,7 @@ def test_a_receiver_the_app_holds_is_reported_as_in_use(monkeypatch):
     def _held(port, **_kwargs):
         raise OSError(f"could not open port '{port}': PermissionError(13, 'Access is denied.')")
 
-    monkeypatch.setattr(receiver, "open_port", _held)
+    monkeypatch.setattr(runtime, "open_port", _held)
 
     with pytest.raises(pandora_sdk.ConnectionFailed, match="COM7 is in use"):
         pandora_sdk.open_receiver(PROFILES, port="COM7", defaults={})
@@ -342,7 +342,7 @@ def test_a_receiver_in_use_has_its_code_and_the_os_error_as_its_cause(monkeypatc
     def _held(port, **_kwargs):
         raise refusal
 
-    monkeypatch.setattr(receiver, "open_port", _held)
+    monkeypatch.setattr(runtime, "open_port", _held)
 
     with pytest.raises(pandora_sdk.ConnectionFailed) as failed:
         pandora_sdk.open_receiver(PROFILES, port=port, defaults={})
@@ -359,7 +359,7 @@ def test_a_port_this_user_may_not_open_has_its_code_and_names_the_group(monkeypa
     def _forbidden(port, **_kwargs):
         raise refusal
 
-    monkeypatch.setattr(receiver, "open_port", _forbidden)
+    monkeypatch.setattr(runtime, "open_port", _forbidden)
 
     with pytest.raises(pandora_sdk.ConnectionFailed) as failed:
         pandora_sdk.open_receiver(PROFILES, port="/dev/ttyACM0", defaults={})
@@ -375,7 +375,7 @@ def test_a_port_that_will_not_open_for_another_reason_has_its_code(monkeypatch):
     def _missing(port, **_kwargs):
         raise refusal
 
-    monkeypatch.setattr(receiver, "open_port", _missing)
+    monkeypatch.setattr(runtime, "open_port", _missing)
 
     with pytest.raises(pandora_sdk.ConnectionFailed) as failed:
         pandora_sdk.open_receiver(PROFILES, port="COM7", defaults={})
@@ -830,18 +830,44 @@ def test_the_debug_stream_has_the_values_of_every_stage_when_asked_for_all(link,
 # ── raw only: no hand made when none is asked for ────────────────────────────
 
 @pytest.fixture
-def pushes(monkeypatch):
+def pushes(monkeypatch, request):
     """Every packet a glove's pipeline is given: (the pipeline, device id,
-    glove_ms), in order."""
-    given = []
-    push = Glove.push_decoded
+    glove_ms), in order, read from the runtime (pandora_core_rs.runtime) of
+    every Local of the test."""
+    given = _Pushes()
+    start = pandora_sdk.Local.__init__
 
-    def _counted(glove, packet):
-        given.append((glove, packet.device_id, packet.timestamp))
-        return push(glove, packet)
+    def _recording(source, *args, **kwargs):
+        start(source, *args, **kwargs)
+        given.watch(source)
 
-    monkeypatch.setattr(Glove, "push_decoded", _counted)
+    monkeypatch.setattr(pandora_sdk.Local, "__init__", _recording)
+    if "gloves" in request.fixturenames:
+        given.watch(request.getfixturevalue("gloves"))
     return given
+
+
+class _Pushes:
+    """A list of the pipeline's packets, read when looked at."""
+
+    def __init__(self):
+        self.sources = []
+
+    def watch(self, source):
+        source._native.record_pipeline()
+        self.sources.append(source)
+
+    def _all(self):
+        return [entry for source in self.sources for entry in source._native.pipeline_log()]
+
+    def __iter__(self):
+        return iter(self._all())
+
+    def __eq__(self, other):
+        return self._all() == other
+
+    def __repr__(self):
+        return repr(self._all())
 
 
 def feed(link, gloves, *lines):
@@ -887,7 +913,7 @@ def test_frames_asked_for_late_come_from_a_new_pipeline_started_at_that_packet(
     assert gloves.read(timeout=2.0).seq == 4
     pipeline = {ms: glove for glove, _, ms in pushes}
     assert sorted(pipeline) == [4, 5]
-    assert pipeline[5] is pipeline[4]
+    assert pipeline[5] == pipeline[4]
 
 
 def test_calibration_of_a_raw_only_glove_builds_its_pipeline_when_asked(link, clock, pushes):

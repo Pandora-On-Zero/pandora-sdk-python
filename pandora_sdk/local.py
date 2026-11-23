@@ -10,10 +10,12 @@
 The same reading as connect() gives (subscribe, frames, raw, debug, read,
 latest, on, devices), the same Frame, Raw and Debug, and the same commands for a
 glove (play_rom, play_rtp, stop, set_hall_range) and calibration bounds, so a
-program can change between the two by changing one line. Here the pipeline
-(pandora-core-rs) runs in this process: one thread reads the receiver's port and
+program can change between the two by changing one line. Here the
+receiver is read in this process by pandora-core-rs's runtime
+(pandora_core_rs.runtime, in Rust): its thread reads the receiver's port and
 pushes each glove's packets through that glove's own pipeline, and commands
-are written to the same port.
+are written to the same port. The same runtime is what the C and C++ SDK
+read through; this module only hands its messages to Source.
 
 A glove's pipeline runs only while a frames or debug subscription includes
 it, or a raw one with cancelled (the counts after earth-field cancellation
@@ -45,22 +47,16 @@ import logging
 import re
 import threading
 import time
-from dataclasses import replace
 from pathlib import Path
-from typing import (Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Set, Tuple,
-                    Union)
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Set, Union
 
-from pandora_core_rs import commands, protocol, receiver
-from pandora_core_rs.glove import Glove, Profile
+from pandora_core_rs import protocol, receiver, runtime
+from pandora_core_rs.glove import Profile
 from pandora_core_rs.packet_decoder import GlovePacket, PacketDecoder
 from pandora_core_rs.packet_layout import (HALL_DEFAULT_FILTER, HALL_DEFAULT_ODR, HALL_DEFAULT_OSR,
-                                           HALL_DEFAULT_RANGE, HALL_FILTER_MAX, HALL_ODR_HZ,
-                                           HALL_OSR_HIGH, HALL_RANGE_5MT, HALL_RANGE_50MT,
-                                           HALL_SENSOR_KEYS, HALL_TARGET_ALL, hall_target_id)
-from pandora_core_rs.protocol import (Calibration, Device, HallRange, Haptics, Pacer, ProtocolError,
-                                      Subscription)
+                                           HALL_DEFAULT_RANGE, HALL_TARGET_ALL)
+from pandora_core_rs.protocol import Calibration, Device, Subscription
 from pandora_core_rs.receiver import ReceiverPort
-from pandora_core_rs.scope import shipped_defaults
 from pandora_core_rs.serial_framing import decode_frame, encode_frame, is_binary_frame
 from pandora_core_rs.tuning import Tuning
 
@@ -70,9 +66,10 @@ from pandora_sdk.source import CallbackFailed, ConnectionFailed, ServerError, So
 # protocol's device list says, and takes no commands.
 SILENT_AFTER_S = 2.0
 
-# The streams that need a hand made: a glove's pipeline runs only while one of
-# them, or raw with cancelled (_runs_pipeline), is subscribed for it.
-HAND_STREAMS = ("frames", "debug")
+# A message of each stream as the runtime hands it over (the app's msgpack),
+# decoded as connect()'s client decodes the app's.
+_DECODE: Dict[str, Callable[[bytes], Any]] = {
+    "frames": protocol.decode_frame, "raw": protocol.decode_raw, "debug": protocol.decode_debug}
 
 Profiles = Union[str, Path, Mapping[str, Union[Profile, Mapping[str, Any]]]]
 
@@ -146,6 +143,23 @@ def open_link(port: Optional[str] = None, *, timeout: float = 0.2,
         raise open_refusal(port, failed, "read through it with pandora_sdk.connect(), "
                                          "or close it.") from failed
     receiver.prepare_link(port, link, _log.info)
+    return link
+
+
+def open_native_link(port: Optional[str] = None, *, timeout: float = 0.2,
+                     write_timeout: float = 2.0) -> Any:
+    """The receiver's serial port opened by pandora-core-rs's runtime, for
+    Local: as open_link() opens it (4 Mbaud, RTS/CTS, held by this program
+    alone, the CH343's flow control on Linux), but read from Rust with no
+    Python in the loop. ConnectionFailed when it cannot be opened."""
+    port = receiver_port(port)
+    try:
+        link = runtime.open_port(port, timeout=timeout, write_timeout=write_timeout)
+    except OSError as failed:
+        raise open_refusal(port, failed, "read through it with pandora_sdk.connect(), "
+                                         "or close it.") from failed
+    for note in getattr(link, "notes", ()):
+        _log.info(note)
     return link
 
 
@@ -257,7 +271,12 @@ class Local(Source):
     """A receiver read in this process. Use open_receiver(); *link* is an
     already open port (or anything with its read, in_waiting, write and
     close), *clock* the seconds frames are stamped and paced with, and
-    *wall_clock* the seconds since the Unix epoch their wall_time_us is."""
+    *wall_clock* the seconds since the Unix epoch their wall_time_us is.
+
+    The reading itself is pandora-core-rs's runtime (pandora_core_rs.runtime):
+    its thread reads the link and runs the pipelines. A thread of this
+    object's ("pandora-sdk-receiver") takes what it made and hands it to
+    Source, so callbacks given to on() and on_line() run there."""
 
     def __init__(self, profiles: Optional[Profiles] = None, *, port: Optional[str] = None,
                  tuning: Union[Tuning, Mapping[str, Any], None] = None,
@@ -268,66 +287,52 @@ class Local(Source):
         super().__init__(buffer)
         if default_hand is not None and default_hand not in protocol.HANDS:
             raise ValueError(f"default_hand is {default_hand!r}; it is 'left', 'right' or None")
-        self._default_hand = default_hand
         if profiles is None or isinstance(profiles, (str, Path)):
-            self._profiles = load_profiles(
-                default_profiles_dir() if profiles is None else profiles)
+            loaded = load_profiles(default_profiles_dir() if profiles is None else profiles)
         else:
-            self._profiles = {device: profile if isinstance(profile, Profile)
-                              else Profile.from_dict(profile)
-                              for device, profile in profiles.items()}
-        self._tuning, self._defaults = tuning, defaults
-        self._clock, self._wall_clock = clock, wall_clock
-        self._decoder = PacketDecoder()
-        # Each glove's pipeline, built only when one is needed: for a frames,
-        # debug or cancelled raw subscription, or for calibration().
-        self._gloves: Dict[str, Glove] = {}
-        # Each glove's newest packet, which a pipeline built for
-        # calibration() loads the glove's profile with.
-        self._last: Dict[str, GlovePacket] = {}
-        self._seq: Dict[str, int] = {}
-        self._seen_s: Dict[str, float] = {}
-        self._streams: Dict[str, Tuple[Subscription, Pacer]] = {}
-        # The Hall range each glove was put on with set_hall_range (resend
-        # on), sent again when it comes back from silence; and the profile,
-        # with the ranges a Hall command put it on, that its raw messages and
-        # pipeline are yet to take, which the glove's next packet does.
-        self._ranges: Dict[str, int] = {}
-        self._new_profile: Dict[str, Profile] = {}
-        # Gloves whose pipeline has had every packet since it was built: the
-        # ones a frames, debug or cancelled raw subscription has included since.
-        self._fed: Set[str] = set()
-        # Held by the reader through each packet, so a glove's pipeline is
-        # never read half-changed (calibration()). Re-entrant: a callback
-        # (on()) runs inside it and may ask for calibration().
-        self._pipeline = threading.RLock()
-        # One command written to the port at a time.
-        self._writing = threading.Lock()
-        # Gloves heard that have no profile: read raw only, as the default
-        # hand, or left out when there is none.
-        self.unprofiled: Set[str] = set()
-        # Tracking packets read so far, from any glove.
+            loaded = {device: profile if isinstance(profile, Profile)
+                      else Profile.from_dict(profile)
+                      for device, profile in profiles.items()}
+        if isinstance(tuning, Tuning):
+            tuning = tuning.to_dict()
+        # Tracking packets read so far, from any glove: counted as their
+        # messages are handed over, so every message of a packet counted is
+        # already in latest() and the queues.
         self.packets = 0
-        # Binary frames read so far that failed their COBS or CRC check.
-        self.bad_frames = 0
         # The function given each receiver text line (on_line()).
         self._on_line: Optional[Callable[[str], object]] = None
-        self._link = open_link(port) if link is None else link
-        self._running = True
-        self._reader = threading.Thread(target=self._read_link, name="pandora-sdk-receiver",
+        # A link given here is closed here; one opened here is the runtime's.
+        self._link = link
+        native_link = open_native_link(port) if link is None else link
+        self._native = runtime.Local(
+            native_link, {device: profile.to_dict() for device, profile in loaded.items()},
+            tuning, defaults, default_hand,
+            # The system's clocks are read in Rust; a clock given is called from there.
+            None if clock is time.monotonic else clock,
+            None if wall_clock is time.time else wall_clock,
+            time.monotonic() if clock is time.monotonic else None)
+        self._stopping = False
+        self._reader = threading.Thread(target=self._take_messages, name="pandora-sdk-receiver",
                                         daemon=True)
         self._reader.start()
+
+    @property
+    def unprofiled(self) -> Set[str]:
+        """Gloves heard that have no profile: read raw only, as the default
+        hand, or left out when there is none."""
+        return set(self._native.unprofiled)
+
+    @property
+    def bad_frames(self) -> int:
+        """Binary frames read so far that failed their COBS or CRC check."""
+        return self._native.bad_frames
 
     # ── the same requests as the app answers ─────────────────────────────
 
     def devices(self, timeout: Optional[float] = None) -> List[Device]:
         """The gloves heard so far, sending or not: those with a profile,
         and those read raw only as the default hand (unprofiled)."""
-        now = self._clock()
-        with self._changed:
-            return [Device(device, self._profiles[device].hand, self._profiles[device].name,
-                           now - seen <= SILENT_AFTER_S)
-                    for device, seen in sorted(self._seen_s.items())]
+        return [Device(*known) for known in self._native.devices()]
 
     def subscribe(self, stream: str = "frames", *, devices: Optional[Sequence[str]] = None,
                   hands: Sequence[str] = protocol.HANDS, rate_hz: float = 0.0,
@@ -340,15 +345,7 @@ class Local(Source):
         had the packet; hall is still the glove's own counts."""
         asked = Subscription(stream, None if devices is None else tuple(devices), tuple(hands),
                              rate_hz, bones, tuple(keys), cancelled)
-        granted = _judged(Subscription.from_message, asked.to_message())
-        if _runs_pipeline(granted.stream, granted):
-            self._require_defaults()
-        with self._changed:
-            self._streams[granted.stream] = (granted, Pacer(granted.rate_hz))
-            if granted.stream == "debug":
-                for glove in self._gloves.values():
-                    _publish_debug(glove)
-        return granted
+        return Subscription.from_message(_answered(self._native.subscribe, asked.to_message()))
 
     # ── commands for a glove (what each does is on Source) ───────────────
 
@@ -357,20 +354,12 @@ class Local(Source):
         """As Client.play_rom. The app's haptic settings (which motors may
         run, the wearer's strength) are the app's: here every command goes
         as given."""
-        request = _judged(Haptics.from_message,
-                          Haptics(device, effects=tuple(effects)).to_message())
-        self._connected(device)
-        self._send(commands.haptic_rom(device, request.effects or ()))
+        _answered(self._native.play_rom, device, list(effects))
 
     def play_rtp(self, device: str, amplitudes: Sequence[int], durations_ms: Sequence[int],
                  timeout: Optional[float] = None) -> None:
         """As Client.play_rtp, with every command going as given (play_rom)."""
-        request = _judged(Haptics.from_message,
-                          Haptics(device, amplitudes=tuple(amplitudes),
-                                  durations_ms=tuple(durations_ms)).to_message())
-        self._connected(device)
-        self._send(commands.haptic_rtp(device, request.amplitudes or (),
-                                       request.durations_ms or ()))
+        _answered(self._native.play_rtp, device, list(amplitudes), list(durations_ms))
 
     def set_hall_range(self, device: str, hall_range: int,
                        timeout: Optional[float] = None, *, resend: bool = True) -> str:
@@ -384,16 +373,7 @@ class Local(Source):
         before is forgotten. The profile file is not changed. Returns "":
         the words the app gives are the app's; calibration(device).extrapolated
         says whether the bounds are a rescale."""
-        request = _judged(HallRange.from_message, HallRange(device, hall_range).to_message())
-        self._connected(device)
-        self._send(_hall_command(device, request.hall_range))
-        with self._changed:
-            self._new_profile[device] = replace(
-                self._next_profile(device), range=request.hall_range, sensor_ranges={})
-            if resend:
-                self._ranges[device] = request.hall_range
-            else:
-                self._ranges.pop(device, None)
+        _answered(self._native.set_hall_range, device, hall_range, resend)
         return ""
 
     def send_hall_config(self, device: str, *, reset: bool = False,
@@ -410,43 +390,8 @@ class Local(Source):
         range after a reset) is what the glove's raw messages say and its
         pipeline is rescaled to, from its next packet: the whole glove's for
         every sensor, one sensor's range (raw sensor_ranges) for one."""
-        sensor = _hall_sensor(target)
-        if hall_range not in (HALL_RANGE_5MT, HALL_RANGE_50MT):
-            raise ServerError("bad_hall_range", f"hall_range is {hall_range!r}; it is 0 "
-                                                "(+-5 mT) or 1 (+-50 mT)")
-        for name, value, top in (("osr", osr, HALL_OSR_HIGH), ("odr", odr, len(HALL_ODR_HZ) - 1),
-                                 ("filter", filter, HALL_FILTER_MAX)):
-            if not isinstance(value, int) or not 0 <= value <= top:
-                raise ServerError("bad_hall_config", f"{name} is {value!r}; it is 0 to {top}")
-        self._connected(device)
-        self._send(commands.hall_config(device, reset=reset, range_val=hall_range, osr=osr,
-                                        odr=odr, filter_val=filter,
-                                        target=HALL_TARGET_ALL if sensor is None
-                                        else hall_target_id(sensor)))
-        now_on = HALL_DEFAULT_RANGE if reset else hall_range
-        with self._changed:
-            before = self._next_profile(device)
-            self._new_profile[device] = (
-                replace(before, range=now_on, sensor_ranges={}) if sensor is None
-                else replace(before, sensor_ranges={**before.sensor_ranges, sensor: now_on}))
-            self._ranges.pop(device, None)
-
-    def _next_profile(self, device: str) -> Profile:
-        """*device*'s profile with the Hall commands sent so far: the one
-        its next packet takes."""
-        return self._new_profile.get(device) or self._profiles[device]
-
-    def _connected(self, device: str) -> None:
-        """ServerError "unknown_device" unless *device* has sent lately, as
-        the app judges a command."""
-        with self._changed:
-            seen = self._seen_s.get(device)
-        if seen is None or self._clock() - seen > SILENT_AFTER_S:
-            raise ServerError("unknown_device", f"no glove {device!r} is sending")
-
-    def _send(self, payload: bytes) -> None:
-        with self._writing:
-            send_command(self._link, payload)
+        _answered(self._native.send_hall_config, device, reset, hall_range, osr, odr, filter,
+                  target)
 
     # ── calibration bounds ───────────────────────────────────────────────
 
@@ -462,62 +407,62 @@ class Local(Source):
     def _calibration_of(self, device: str, timeout: Optional[float]) -> Calibration:
         """From the glove's own stores, as the app's server reads them. A
         glove with no pipeline yet gets one, loaded with its newest packet."""
-        with self._pipeline, self._changed:
-            if device not in self._seen_s:
-                raise ServerError("unknown_device", f"no glove {device!r} has been heard")
-            if device in self.unprofiled:
-                # No profile, so no calibration: as an uncalibrated glove's.
-                return Calibration(device, self._profiles[device].range, False, {})
-            glove = self._gloves.get(device)
-            if glove is None:
-                glove = self._gloves[device] = self._glove(self._profiles[device])
-                glove.push_decoded(self._last[device])
-            bounds = glove.active_bounds(device)
-        return protocol.parse_calibration(protocol.calibration_message(device, bounds))
+        return protocol.parse_calibration(_answered(self._native.calibration, device))
 
     # ── the receiver ─────────────────────────────────────────────────────
-
-    def _read_link(self) -> None:
-        """The reader thread: packets to frames until the port ends."""
-        why, code, cause = "", "closed", None
-        try:
-            for packet in link_packets(self._link, self._decoder, self._on_other):
-                if not self._running:
-                    break
-                if packet is not None:
-                    with self._pipeline:
-                        self._on_packet(packet)
-        except OSError as failed:
-            why, code, cause = link_failure(failed), link_failure_code(failed), failed
-        except CallbackFailed as failed:
-            why, code, cause = str(failed), "callback_failed", failed.__cause__
-        except Exception as failed:  # the pipeline's own failure must not pass for silence
-            why, code, cause = f"a glove's pipeline failed ({failed!r})", "pipeline_failed", failed
-        self._end(why, code, cause)
 
     def on_line(self, callback: Optional[Callable[[str], object]]) -> None:
         """Call *callback* with each text line the receiver sends among the
         frames (its status: "BL:CONN ...", "PONG", "DFU:..." and the like),
         without its line end, in order with the packets; None stops. As
-        with on(), it runs on the thread that reads the receiver, so keep it
+        with on(), it runs on the thread that hands messages over, so keep it
         short, and if it raises the source ends (Disconnected, code
         "callback_failed"). Without it, text lines are dropped. Only without
         the app: the app keeps the receiver's lines to itself."""
         with self._changed:
             self._on_line = callback
+        self._native.want_lines(callback is not None)
 
-    def _on_other(self, line: bytes) -> None:
-        """A line from the receiver that held no tracking packet: a damaged
-        frame (counted), a status line (to on_line), or neither (a frame of
-        another kind, the tail of a frame cut off when the port opened)."""
-        if is_damaged_frame(line):
-            with self._changed:
-                self.bad_frames += 1
-            return
+    def _take_messages(self) -> None:
+        """This object's thread: the runtime's messages to Source until it
+        ends or this object is closed."""
+        native = self._native
+        why, code, cause = "", "closed", None
+        try:
+            while True:
+                event = native.next_event(0.1)
+                if event is None:
+                    if self._stopping:
+                        break
+                    continue
+                kind = event[0]
+                if kind == "message":
+                    _, stream, _device, data = event
+                    self._deliver(stream, _DECODE[stream](data))
+                elif kind == "packet":
+                    with self._changed:
+                        self.packets = event[1]
+                        self._changed.notify_all()
+                elif kind == "line":
+                    self._line(event[1])
+                elif kind == "ended":
+                    why, code = event[1], event[2]
+                    cause = native.take_link_error()
+                    if cause is None and code in ("unplugged", "read_failed"):
+                        cause = OSError(why)
+                    break
+        except CallbackFailed as failed:
+            native.stop()
+            why, code, cause = str(failed), "callback_failed", failed.__cause__
+        except Exception as failed:  # a message that would not decode must not pass for silence
+            native.stop()
+            why, code, cause = f"a glove's pipeline failed ({failed!r})", "pipeline_failed", failed
+        self._end(why, code, cause)
+
+    def _line(self, text: str) -> None:
         with self._changed:
             callback = self._on_line
-        text = text_of(line) if callback is not None else None
-        if callback is None or text is None:
+        if callback is None:
             return
         try:
             callback(text)
@@ -526,172 +471,24 @@ class Local(Source):
             raise CallbackFailed(f"the callback for the receiver's lines raised "
                                  f"{failed!r}") from failed
 
-    def _on_packet(self, packet: GlovePacket) -> None:
-        device = packet.device_id
-        retired: Optional[Glove] = None
-        with self._changed:
-            self.packets += 1
-            profile = self._profiles.get(device)
-            if profile is None:
-                self.unprofiled.add(device)
-                if self._default_hand is None:
-                    return
-                profile = self._profiles[device] = Profile(self._default_hand)
-            # A glove with no profile of its own is read raw only.
-            raw_only = device in self.unprofiled
-            if device in self._new_profile:
-                # A new Glove on the new ranges, when one is next needed:
-                # building one is how the core puts a glove's calibration on
-                # the ranges its profile names.
-                profile = self._profiles[device] = self._new_profile.pop(device)
-                retired = self._gloves.pop(device, None)
-                self._fed.discard(device)
-            # A hand is made only for a glove that a frames or debug
-            # subscription includes, or a raw one with cancelled. A pipeline
-            # that missed packets starts again as a new Glove, as on the
-            # glove's first packet: its filters would otherwise pick up from
-            # a packet long gone.
-            make_hand = not raw_only and any(wanted.wants(device, profile.hand)
-                                             for stream, (wanted, _) in self._streams.items()
-                                             if _runs_pipeline(stream, wanted))
-            glove = self._gloves.get(device)
-            if make_hand and (glove is None or device not in self._fed):
-                if glove is not None:
-                    retired = glove
-                glove = self._gloves[device] = self._glove(profile)
-            if make_hand:
-                self._fed.add(device)
-            else:
-                self._fed.discard(device)
-            now = self._clock()
-            back = now - self._seen_s.get(device, now) > SILENT_AFTER_S
-            resend = self._ranges.get(device) if back else None
-            seq = self._seq[device] = self._seq.get(device, 0) + 1
-            self._seen_s[device] = now
-            self._last[device] = packet
-            due = {stream: wanted for stream, (wanted, pacer) in self._streams.items()
-                   if wanted.wants(device, profile.hand) and pacer.due(device, now)}
-        if retired is not None:
-            retired.close()
-        if resend is not None:
-            try:
-                self._send(_hall_command(device, resend))
-            except ServerError as failed:
-                _log.warning("could not put %s back on its Hall range: %s", device, failed)
-        time_us = int(now * 1_000_000)
-        wall_time_us = int(self._wall_clock() * 1_000_000)
-        # The Frame, Raw and Debug a client of the app would get: through the
-        # protocol's own code, so the two modes cannot differ. A Raw is built
-        # straight from the packet (raw_from_packet is decode_raw of
-        # encode_raw, without the msgpack round trip).
-        raw = None
-        cancelled = "raw" in due and due["raw"].cancelled and not raw_only
-        if "raw" in due:
-            # Before the pipeline, which changes the packet in place: hall is
-            # what the glove sent.
-            raw = protocol.raw_from_packet(
-                packet, profile.hand, seq, time_us, profile.range, profile.sensor_ranges,
-                wall_time_us)
-        if raw is not None and not cancelled:
-            self._deliver("raw", raw)
-        if not make_hand or glove is None:
-            return
-        # From here every packet goes through the pipeline, wanted now or
-        # not: its filters carry state from one to the next.
-        frame = glove.push_decoded(packet)
-        if raw is not None and cancelled:
-            # The counts the pipeline normalised exist only now, after gap
-            # fill and earth-field cancellation changed the packet: read by
-            # the core's raw_from_packet, as the app's server reads them
-            # (encode_raw, the same code). The rest of the message stays the
-            # one made before.
-            after = protocol.raw_from_packet(
-                packet, profile.hand, seq, time_us, profile.range, profile.sensor_ranges,
-                wall_time_us, cancelled=True)
-            self._deliver("raw", replace(
-                raw, hall_cancelled=after.hall_cancelled,
-                thumb_distal_cancelled=after.thumb_distal_cancelled,
-                earth_cancelled=after.earth_cancelled))
-        if "frames" in due:
-            self._deliver("frames", protocol.decode_frame(protocol.encode_frame(
-                frame, seq, time_us, due["frames"].bones, wall_time_us)))
-        if "debug" in due:
-            values = glove.debug_values(list(due["debug"].keys))
-            self._deliver("debug", protocol.decode_debug(protocol.encode_debug(
-                device, profile.hand, seq, time_us, values, wall_time_us)))
-
-    def _require_defaults(self) -> Mapping[str, Any]:
-        """The pipeline's default files: those given, or pandora-core-rs's
-        (compiled into it), parsed when the first pipeline is wanted."""
-        if self._defaults is None:
-            self._defaults = shipped_defaults()
-        return self._defaults
-
-    def _glove(self, profile: Profile) -> Glove:
-        """A pipeline for *profile*, publishing its debug values when they
-        are subscribed to."""
-        glove = Glove(profile, self._tuning, self._require_defaults())
-        if "debug" in self._streams:
-            _publish_debug(glove)
-        return glove
-
     def close(self) -> None:
         """Stop reading and close the port. Unread messages can still be read."""
         with self._changed:
             self._closed = True
             self._changed.notify_all()
-        self._running = False
+        self._stopping = True
+        self._native.close()
         if threading.current_thread() is not self._reader:
             self._reader.join(timeout=2.0)
-        self._link.close()
-        for glove in self._gloves.values():
-            glove.close()
+        if self._link is not None:
+            self._link.close()
 
 
-def _judged(parse: Callable[[Dict[str, Any]], Any], message: Dict[str, Any]) -> Any:
-    """*message* read by the core's own parser, as the app's server reads a
-    request; what it refuses is a ServerError with the protocol's code."""
+def _answered(request: Callable[..., Any], *args: Any) -> Any:
+    """*request* to the runtime; what it refuses is a ServerError with the
+    protocol's code, as the app's server refuses a request."""
     try:
-        return parse(message)
-    except ProtocolError as refused:
-        raise ServerError(refused.code, str(refused)) from None
-
-
-def _runs_pipeline(stream: str, wanted: Subscription) -> bool:
-    """Whether a subscription to *stream* needs the gloves it includes to go
-    through their pipelines: frames and debug are made by it, and raw's
-    cancelled counts are the packet as it leaves it."""
-    return stream in HAND_STREAMS or (stream == "raw" and wanted.cancelled)
-
-
-def _hall_command(device: str, hall_range: int) -> bytes:
-    """Every Hall sensor of *device* on *hall_range*, with the oversampling,
-    data rate and filter it powers up with."""
-    return commands.hall_config(device, reset=False, range_val=hall_range, osr=HALL_DEFAULT_OSR,
-                                odr=HALL_DEFAULT_ODR, filter_val=HALL_DEFAULT_FILTER,
-                                target=HALL_TARGET_ALL)
-
-
-# Hall config target id -> the sensor's key, as a profile's sensor_ranges
-# names it.
-_HALL_SENSORS = {hall_target_id(key): key for key in HALL_SENSOR_KEYS}
-
-
-def _hall_sensor(target: Union[int, str]) -> Optional[str]:
-    """The sensor key *target* names (a target id or a key), None for every
-    sensor; ServerError "bad_hall_config" for no sensor a glove has."""
-    if target == HALL_TARGET_ALL:
-        return None
-    if isinstance(target, str) and target in HALL_SENSOR_KEYS:
-        return target
-    if isinstance(target, int) and not isinstance(target, bool) and target in _HALL_SENSORS:
-        return _HALL_SENSORS[target]
-    raise ServerError("bad_hall_config",
-                      f"target is {target!r}; it is HALL_TARGET_ALL ({HALL_TARGET_ALL}), a "
-                      f"sensor's id ({sorted(_HALL_SENSORS)}) or its key ({list(HALL_SENSOR_KEYS)})")
-
-
-def _publish_debug(glove: Glove) -> None:
-    """Have *glove*'s pipeline publish its named values (its own debug tap,
-    one per glove)."""
-    glove.debug_want("pandora-sdk", True)
+        return request(*args)
+    except runtime.Refused as refused:
+        code, message = refused.args
+        raise ServerError(code, message) from None
