@@ -3,7 +3,7 @@
 What changed in each release of pandora-sdk, newest first. Every change a program may
 notice raises the version.
 
-## 0.5.0 (unreleased)
+## 0.5.0 (2026-11-23)
 
 - **`open_receiver()` runs on pandora-core-rs's runtime** (`pandora_core_rs.runtime`, in
   Rust): the port, the reader thread and the gloves' pipelines are read with no Python in
