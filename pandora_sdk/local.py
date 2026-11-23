@@ -30,7 +30,12 @@ is wanted for, so its smoothing begins there, as on a glove's first packet.
 A glove's frames need a profile: its hand and the calibration it carries.
 `pandora calibrate` (pandora_sdk/calibrate.py) writes one, into
 default_profiles_dir() unless told otherwise, which is also where profiles
-are read from when none are named. A glove with none is read raw only: its
+are read from when none are named. A glove with no profile given this way
+has its own read from its flash: the hand and calibration the 01 Glove app
+stores on it (read_glove_profiles, on by default), so a glove calibrated in
+the app gives frames here too. Its packets do not wait for the read, which
+takes a moment; on_status() and glove_profile_status() say how it went. A
+profile given always wins over the glove's. A glove with none is read raw only: its
 raw messages are passed on as the default hand's (default_hand, "right"
 unless told otherwise; the packet does not say), it takes commands, and it
 never gets a pipeline, so no frames, debug values or cancelled counts; its id
@@ -251,7 +256,8 @@ def link_failure_code(failed: OSError) -> str:
 def open_receiver(profiles: Optional[Profiles] = None, *, port: Optional[str] = None,
                   tuning: Union[Tuning, Mapping[str, Any], None] = None,
                   defaults: Optional[Mapping[str, Any]] = None, buffer: int = 256,
-                  default_hand: Optional[str] = "right") -> "Local":
+                  default_hand: Optional[str] = "right",
+                  read_glove_profiles: bool = True) -> "Local":
     """Open the receiver on this computer and run the gloves' pipelines here.
 
     *profiles* is a folder of `<device id>.json` files, or a dict of device id
@@ -261,10 +267,13 @@ def open_receiver(profiles: Optional[Profiles] = None, *, port: Optional[str] = 
     *defaults* its shipped default files as parsed JSON by file name; left
     out, pandora-core-rs's own are used, read when the first pipeline is built.
     *default_hand* is the hand a glove with no profile is read as, raw only;
-    None leaves such a glove out.
+    None leaves such a glove out. *read_glove_profiles*: a glove with no
+    profile in *profiles* is read with the one it stores itself, once read
+    (the 01 Glove app's calibration); False reads it as a glove with no
+    profile.
     """
     return Local(profiles, port=port, tuning=tuning, defaults=defaults, buffer=buffer,
-                 default_hand=default_hand)
+                 default_hand=default_hand, read_glove_profiles=read_glove_profiles)
 
 
 class Local(Source):
@@ -283,7 +292,8 @@ class Local(Source):
                  defaults: Optional[Mapping[str, Any]] = None, buffer: int = 256,
                  link: Any = None, clock: Callable[[], float] = time.monotonic,
                  wall_clock: Callable[[], float] = time.time,
-                 default_hand: Optional[str] = "right") -> None:
+                 default_hand: Optional[str] = "right",
+                 read_glove_profiles: bool = True) -> None:
         super().__init__(buffer)
         if default_hand is not None and default_hand not in protocol.HANDS:
             raise ValueError(f"default_hand is {default_hand!r}; it is 'left', 'right' or None")
@@ -301,6 +311,11 @@ class Local(Source):
         self.packets = 0
         # The function given each receiver text line (on_line()).
         self._on_line: Optional[Callable[[str], object]] = None
+        # The function given each glove status (on_status()), and how each
+        # glove's profile read ended (its last profile_* status kind).
+        self._on_status: Optional[Callable[[str, str, str], object]] = None
+        self._read_glove_profiles = read_glove_profiles
+        self._profile_status: Dict[str, str] = {}
         # A link given here is closed here; one opened here is the runtime's.
         self._link = link
         native_link = open_native_link(port) if link is None else link
@@ -310,7 +325,8 @@ class Local(Source):
             # The system's clocks are read in Rust; a clock given is called from there.
             None if clock is time.monotonic else clock,
             None if wall_clock is time.time else wall_clock,
-            time.monotonic() if clock is time.monotonic else None)
+            time.monotonic() if clock is time.monotonic else None,
+            read_glove_profiles=read_glove_profiles)
         self._stopping = False
         self._reader = threading.Thread(target=self._take_messages, name="pandora-sdk-receiver",
                                         daemon=True)
@@ -326,6 +342,39 @@ class Local(Source):
     def bad_frames(self) -> int:
         """Binary frames read so far that failed their COBS or CRC check."""
         return self._native.bad_frames
+
+    @property
+    def incompatible(self) -> Dict[str, str]:
+        """What gloves send that this SDK cannot read, in words, by device id
+        ("receiver" for a packet naming none): the glove's (or receiver's)
+        firmware and this SDK's pandora-core-rs do not match, so its packets
+        are left out until whichever is older is updated."""
+        return dict(self._native.incompatible)
+
+    def uses_glove_profile(self, device: str) -> bool:
+        """Whether *device* runs on the profile it stores itself (read from
+        the glove), rather than one given here or none."""
+        return self._native.uses_glove_profile(device)
+
+    def glove_profile_status(self, device: str) -> Optional[str]:
+        """How reading *device*'s own profile ended, as its status kind:
+        "profile_loaded", "profile_unsupported" (firmware without a profile
+        store), "profile_failed" or "profile_no_hand". None while it is being
+        read, for a glove given a profile, or with read_glove_profiles off."""
+        with self._changed:
+            return self._profile_status.get(device)
+
+    def on_status(self, callback: Optional[Callable[[str, str, str], object]]) -> None:
+        """Call *callback*(device, kind, message) with what there is to know
+        about a glove as it happens: its own profile read (kind
+        "profile_loaded", "profile_unsupported", "profile_failed",
+        "profile_no_hand") and packets this SDK cannot read
+        ("incompatible_firmware"; device "receiver" when the packet names
+        none). Every status is also logged on the "pandora_sdk" logger. As
+        with on(), it runs on the thread that hands messages over, and if it
+        raises the source ends (Disconnected, "callback_failed"). None stops."""
+        with self._changed:
+            self._on_status = callback
 
     # ── the same requests as the app answers ─────────────────────────────
 
@@ -445,6 +494,8 @@ class Local(Source):
                         self._changed.notify_all()
                 elif kind == "line":
                     self._line(event[1])
+                elif kind == "status":
+                    self._status(event[1], event[2], event[3])
                 elif kind == "ended":
                     why, code = event[1], event[2]
                     cause = native.take_link_error()
@@ -470,6 +521,21 @@ class Local(Source):
             _log.exception("the callback for the receiver's lines raised")
             raise CallbackFailed(f"the callback for the receiver's lines raised "
                                  f"{failed!r}") from failed
+
+    def _status(self, device: str, kind: str, message: str) -> None:
+        trouble = kind in ("incompatible_firmware", "profile_failed", "profile_no_hand")
+        (_log.warning if trouble else _log.info)("%s: %s", device, message)
+        with self._changed:
+            if kind.startswith("profile_"):
+                self._profile_status[device] = kind
+            callback = self._on_status
+        if callback is None:
+            return
+        try:
+            callback(device, kind, message)
+        except Exception as failed:
+            _log.exception("the callback for glove statuses raised")
+            raise CallbackFailed(f"the callback for glove statuses raised {failed!r}") from failed
 
     def close(self) -> None:
         """Stop reading and close the port. Unread messages can still be read."""

@@ -12,6 +12,15 @@ notice raises the version.
   `pandora-sdk-receiver` thread, as before.
 - Depends on `pandora-core-rs>=0.3,<0.4`.
 - `open_link()` and `pandora calibrate` still open the port with pyserial.
+- **A glove's own profile:** a glove with no profile given (no `pandora calibrate` file
+  for it) is read with the hand and calibration it stores in its flash, the ones the
+  01 Glove app writes, so a glove set up in the app gives frames here too. A profile given
+  still wins. `read_glove_profiles=False` (`pandora watch --local --no-glove-profiles`)
+  turns it off. New: `Local.on_status()`, `uses_glove_profile()`, `glove_profile_status()`.
+  An empty profiles folder no longer stops `pandora watch --local`.
+- **Firmware this SDK cannot read is reported:** a glove sending a tracking packet of
+  another layout (newer or older firmware) was left out silently; now it is named in
+  `Local.incompatible`, logged, and given to `on_status()` as `incompatible_firmware`.
 
 ## 0.4.1 (2026-11-13)
 
