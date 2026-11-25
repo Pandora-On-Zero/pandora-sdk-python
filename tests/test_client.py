@@ -32,7 +32,7 @@ def test_what_the_app_said_in_its_hello_is_kept(gloves):
     assert gloves.server == pandora_sdk.Server(
         name="01glove-app", version="0.2.26", protocol=1,
         capabilities=("frames", "raw", "devices", "haptics", "hall_range", "calibration",
-                      "debug", "raw_cancelled"))
+                      "debug", "raw_cancelled", "tracker_offset"))
 
 
 def test_an_app_on_another_protocol_version_is_refused_and_told():
@@ -376,6 +376,28 @@ def test_calibration_with_no_glove_named_is_every_glove_in_the_device_list(glove
 def test_calibration_of_a_glove_the_app_has_not_seen_is_refused(gloves):
     with pytest.raises(pandora_sdk.ServerError) as refused:
         gloves.calibration("NRF_GLOVE_NOPE")
+
+    assert refused.value.code == "unknown_device"
+
+
+# ── tracker offset ───────────────────────────────────────────────────────────
+
+SPEC_POSE = (-0.02, -0.035, 0.05, 0.99144, -0.13053, 0.0, 0.0)
+
+
+def test_tracker_offset_of_a_glove_is_the_one_the_app_has_for_it(app, gloves):
+    assert gloves.tracker_offset(RIGHT) == pandora_sdk.TrackerMount(
+        RIGHT, True, -2.0, -3.5, 5.0, 0.0, -15.0, 0.0, SPEC_POSE)
+    assert app.of_type("tracker_offset") == [{"type": "tracker_offset", "device": RIGHT}]
+
+
+def test_tracker_offset_with_no_glove_named_is_every_glove_in_the_device_list(gloves):
+    assert sorted(gloves.tracker_offset()) == [LEFT, RIGHT]
+
+
+def test_tracker_offset_of_a_glove_the_app_has_not_seen_is_refused(gloves):
+    with pytest.raises(pandora_sdk.ServerError) as refused:
+        gloves.tracker_offset("NRF_GLOVE_NOPE")
 
     assert refused.value.code == "unknown_device"
 

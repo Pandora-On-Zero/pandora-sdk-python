@@ -60,7 +60,7 @@ from pandora_core_rs.glove import Profile
 from pandora_core_rs.packet_decoder import GlovePacket, PacketDecoder
 from pandora_core_rs.packet_layout import (HALL_DEFAULT_FILTER, HALL_DEFAULT_ODR, HALL_DEFAULT_OSR,
                                            HALL_DEFAULT_RANGE, HALL_TARGET_ALL)
-from pandora_core_rs.protocol import Calibration, Device, Subscription
+from pandora_core_rs.protocol import Calibration, Device, Subscription, TrackerMount
 from pandora_core_rs.receiver import ReceiverPort
 from pandora_core_rs.serial_framing import decode_frame, encode_frame, is_binary_frame
 from pandora_core_rs.tuning import Tuning
@@ -477,6 +477,13 @@ class Local(Source):
         """From the glove's own stores, as the app's server reads them. A
         glove with no pipeline yet gets one, loaded with its newest packet."""
         return protocol.parse_calibration(_answered(self._native.calibration, device))
+
+    # ── tracker offset ───────────────────────────────────────────────────
+
+    def _tracker_offset_of(self, device: str, timeout: Optional[float]) -> TrackerMount:
+        """The TRACKER section of the profile the glove runs on: a profile
+        file's, or the one read from its flash."""
+        return protocol.parse_tracker_offset(_answered(self._native.tracker_offset, device))
 
     # ── the receiver ─────────────────────────────────────────────────────
 

@@ -17,7 +17,7 @@ from websockets.sync.server import serve
 
 HELLO = {"type": "hello", "protocol": 1, "server": "01glove-app", "version": "0.2.26",
          "capabilities": ["frames", "raw", "devices", "haptics", "hall_range", "calibration",
-                          "debug", "raw_cancelled"]}
+                          "debug", "raw_cancelled", "tracker_offset"]}
 
 DEVICES = {"type": "devices", "devices": [
     {"id": "NRF_GLOVE_E5D1", "hand": "right", "name": "Lab right", "connected": True},
@@ -80,6 +80,12 @@ CALIBRATION: Dict[str, Any] = {
     "calibrations": {"Index": {
         "prox_min": {"x": -812, "y": 140, "z": 2210}, "prox_max": {"x": 35, "y": -12, "z": 4020},
         "meta_min": {"x": 410, "y": -96, "z": 1388}, "meta_max": {"x": 12, "y": 8, "z": 2950}}}}
+
+# The spec's tracker_offset example.
+TRACKER_OFFSET: Dict[str, Any] = {
+    "type": "tracker_offset", "device": "NRF_GLOVE_E5D1", "stored": True,
+    "offset": {"pos_x": -2.0, "pos_y": -3.5, "pos_z": 5.0, "yaw": 0.0, "pitch": -15.0, "roll": 0.0},
+    "pose": [-0.02, -0.035, 0.05, 0.99144, -0.13053, 0.0, 0.0]}
 
 # The note the spec's set_hall_range reply carries.
 HALL_RANGE_NOTE = "curl calibration extrapolated to the new range"
@@ -240,6 +246,14 @@ class StandIn:
             if refused is None and message["device"] not in known:
                 refused = error("unknown_device", f"the app has not seen {message['device']!r}")
             return [refused or calibration(device=message["device"])]
+        if kind == "tracker_offset":
+            known = [d["id"] for d in DEVICES["devices"]]
+            if "device" not in message:
+                return [{**TRACKER_OFFSET, "device": device} for device in known]
+            refused = _bad_device(message)
+            if refused is None and message["device"] not in known:
+                refused = error("unknown_device", f"the app has not seen {message['device']!r}")
+            return [refused or {**TRACKER_OFFSET, "device": message["device"]}]
         if kind == "haptics":
             refused = _bad_device(message) or _bad_haptics(message) or _not_connected(message)
             return [refused or {"type": "haptics_sent", "device": message["device"]}]

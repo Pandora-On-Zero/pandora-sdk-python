@@ -23,7 +23,7 @@ from typing import (Any, Callable, Deque, Dict, Iterator, List, Optional, Sequen
 from pandora_core_rs import protocol
 from pandora_core_rs.packet_layout import (HALL_DEFAULT_FILTER, HALL_DEFAULT_ODR, HALL_DEFAULT_OSR,
                                            HALL_DEFAULT_RANGE, HALL_TARGET_ALL, HAPTIC_MOTOR_COUNT)
-from pandora_core_rs.protocol import Calibration, Debug, Device, Frame, Raw, Subscription
+from pandora_core_rs.protocol import Calibration, Debug, Device, Frame, Raw, Subscription, TrackerMount
 
 Message = Union[Frame, Raw, Debug]
 
@@ -367,6 +367,30 @@ class Source:
         raise NotImplementedError
 
     def _calibration_of(self, device: str, timeout: Optional[float]) -> Calibration:
+        raise NotImplementedError
+
+    # ── tracker offset ───────────────────────────────────────────────────
+
+    @overload
+    def tracker_offset(self, device: str, timeout: Optional[float] = None) -> TrackerMount: ...
+
+    @overload
+    def tracker_offset(self, device: None = None,
+                       timeout: Optional[float] = None) -> Dict[str, TrackerMount]: ...
+
+    def tracker_offset(self, device: Optional[str] = None, timeout: Optional[float] = None
+                       ) -> Union[TrackerMount, Dict[str, TrackerMount]]:
+        """Where the tracker fixed to *device* (a VR tracker, a controller)
+        sits relative to its hand root, as the glove stores it: .pose is the
+        root's pose in the tracker's frame, for place_on_tracker or a
+        HandPlacer. With no device named, every glove's in devices() by id.
+        ServerError "unknown_device" for a glove not known."""
+        if device is not None:
+            return self._tracker_offset_of(device, timeout)
+        return {known.id: self._tracker_offset_of(known.id, timeout)
+                for known in self.devices(timeout)}
+
+    def _tracker_offset_of(self, device: str, timeout: Optional[float]) -> TrackerMount:
         raise NotImplementedError
 
     def close(self) -> None:

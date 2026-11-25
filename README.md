@@ -247,6 +247,33 @@ a new Hall range); `gloves.latest_calibration(glove_id)` is the newest it sent,
 without asking. `extrapolated` means the bounds were captured at another Hall
 range and rescaled to this one.
 
+### Placing the hand on a tracker
+
+The glove gives the hand's shape relative to its root, not where the hand is in
+the room. A tracker strapped to it (a VR tracker, a controller) gives that; the
+glove's profile stores where the tracker sits on the hand:
+
+```python
+mount = gloves.tracker_offset("NRF_GLOVE_E5D1")
+print(mount.stored, mount.pos_x, mount.pitch)        # cm and degrees, as stored
+placer = pandora_sdk.HandPlacer("right")
+
+for frame in gloves.frames():
+    tracker = my_tracker_pose()                      # (x, y, z, qw, qx, qy, qz) or None if lost
+    placed = placer.update(time.monotonic(), tracker, frame.wrist_deg, mount.pose)
+    if placed.state != pandora_sdk.PlacementState.NONE:
+        world = pandora_sdk.bones_in_world(placed.root, frame.bones)
+```
+
+Poses are `(x, y, z, qw, qx, qy, qz)` in metres, in the bones' axes (+X right,
++Y up, -Z forward: OpenVR's and OpenXR's). `place_on_tracker(tracker,
+mount.pose)` is the hand root on its own; the placer adds what happens when
+the tracker is lost: the root stays where it was and turns with the glove's
+IMU (`imu_hold`) for up to a second, then holds still (`held`) until the
+tracker is back. `mount.stored` is false for a glove with no offset stored,
+and its pose is then the identity. `tracker_offset()` with no glove named
+gives every glove's, by id.
+
 ### Debug values
 
 The pipeline's own named values per glove, for finding out why a hand looks
