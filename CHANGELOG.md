@@ -3,6 +3,19 @@
 What changed in each release of pandora-sdk, newest first. Every change a program may
 notice raises the version.
 
+## 0.6.0 (unreleased)
+
+- **The hand on a tracker:** `tracker_offset(glove)` gives where the tracker fixed to a
+  glove (a VR tracker, a controller) sits relative to the hand root, as the glove's
+  profile stores it (its `TRACKER` section, the one the SteamVR driver uses). With no
+  glove named, every glove's, by id. It works from the app (the protocol's new
+  `tracker_offset` request) and with `open_receiver()`.
+- New from pandora-core-rs, re-exported: `TrackerMount`, `tracker_offset_pose`,
+  `place_on_tracker`, `bones_in_world` and `HandPlacer`, which keeps the hand placed
+  through a short tracker loss by turning it with the glove's IMU (`Placement`,
+  `PlacementState`).
+- Depends on `pandora-core-rs>=0.4,<0.5`.
+
 ## 0.5.0 (2026-11-24)
 
 - **`open_receiver()` runs on pandora-core-rs's runtime** (`pandora_core_rs.runtime`, in

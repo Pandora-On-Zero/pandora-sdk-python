@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pandora-sdk"
-version = "0.5.0"
+version = "0.6.0"
 description = "Hands from the 01 Glove app in a few lines of Python"
 readme = "README.md"
 license = "PolyForm-Noncommercial-1.0.0"
@@ -13,7 +13,7 @@ requires-python = ">=3.10"
 dependencies = [
     # The message format and the pipeline are pandora-core-rs's (the Rust core's
     # Python binding, prebuilt wheels on PyPI), not a copy of them.
-    "pandora-core-rs>=0.3,<0.4",
+    "pandora-core-rs>=0.4,<0.5",
     # The receiver's port (pandora_core_rs.receiver).
     "pyserial>=3.5",
     "websockets>=13",

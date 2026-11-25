@@ -28,7 +28,7 @@ from pandora_core_rs import protocol
 from pandora_core_rs.packet_layout import (HALL_DEFAULT_FILTER, HALL_DEFAULT_ODR, HALL_DEFAULT_OSR,
                                            HALL_DEFAULT_RANGE, HALL_TARGET_ALL)
 from pandora_core_rs.protocol import (DEFAULT_PORT, Calibration, Device, HallRange, Haptics,
-                                      ProtocolError, Subscription)
+                                      ProtocolError, Subscription, TrackerMount)
 
 from pandora_sdk.source import (CallbackFailed, ConnectionFailed, Disconnected, PandoraError,
                                 ServerError, Source)
@@ -38,7 +38,8 @@ __all__ = ["Client", "ConnectionFailed", "Disconnected", "PandoraError", "Server
 
 # The text messages that answer a request. "devices" and "calibration" are
 # also sent unasked, when they change.
-REPLIES = ("devices", "subscribed", "error", "haptics_sent", "hall_range", "calibration")
+REPLIES = ("devices", "subscribed", "error", "haptics_sent", "hall_range", "calibration",
+           "tracker_offset")
 
 
 @dataclass(frozen=True)
@@ -192,6 +193,13 @@ class Client(Source):
         reply = self._request({"type": "calibration", "device": device}, "calibration", timeout,
                               device=device)
         return protocol.parse_calibration(reply)
+
+    # ── tracker offset ───────────────────────────────────────────────────
+
+    def _tracker_offset_of(self, device: str, timeout: Optional[float]) -> TrackerMount:
+        reply = self._request({"type": "tracker_offset", "device": device}, "tracker_offset",
+                              timeout, device=device)
+        return protocol.parse_tracker_offset(reply)
 
     def _request(self, message: Dict[str, Any], answer: str, timeout: Optional[float],
                  **match: Any) -> Dict[str, Any]:

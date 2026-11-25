@@ -825,6 +825,61 @@ def test_calibration_of_a_glove_not_heard_is_refused(calibrated):
     assert refused.value.code == "unknown_device"
 
 
+# ── tracker offset ───────────────────────────────────────────────────────────
+
+MOUNT = {"pos_x": -2.0, "pos_y": -3.5, "pos_z": 5.0, "yaw": 0.0, "pitch": -15.0, "roll": 0.0}
+MOUNTED = {RIGHT: {**CALIBRATED[RIGHT], "sections": {**CALIBRATED[RIGHT]["sections"], "TRACKER": MOUNT}},
+           LEFT: CALIBRATED[LEFT]}
+
+
+@pytest.fixture
+def mounted(link, clock):
+    with pandora_sdk.Local(MOUNTED, link=link, defaults={}, clock=clock) as opened:
+        link.feed(packet_line(RIGHT), packet_line(LEFT))
+        assert wait(lambda: len(opened.devices()) == 2)
+        yield opened
+
+
+def test_tracker_offset_is_the_one_the_gloves_profile_stores(mounted):
+    mount = mounted.tracker_offset(RIGHT)
+
+    assert (mount.device, mount.stored, mount.pos_x, mount.pos_z, mount.pitch) == (
+        RIGHT, True, -2.0, 5.0, -15.0)
+    assert mount.pose == pandora_sdk.tracker_offset_pose(MOUNT)
+
+
+def test_tracker_offset_of_a_glove_storing_none_is_zero(mounted):
+    mount = mounted.tracker_offset(LEFT)
+
+    assert not mount.stored
+    assert mount.pose == (0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0)
+
+
+def test_tracker_offset_with_no_glove_named_is_every_glove_heard(mounted):
+    assert sorted(mounted.tracker_offset()) == [LEFT, RIGHT]
+
+
+def test_tracker_offset_of_a_glove_not_heard_is_refused(mounted):
+    with pytest.raises(pandora_sdk.ServerError) as refused:
+        mounted.tracker_offset(STRANGER)
+
+    assert refused.value.code == "unknown_device"
+
+
+def test_a_frame_is_placed_on_a_tracker_through_the_gloves_offset(mounted):
+    """The README's example: the hand root on the tracker, then held through a loss."""
+    tracker = (0.1, 1.2, -0.3, 1.0, 0.0, 0.0, 0.0)
+    offset = mounted.tracker_offset(RIGHT).pose
+    placer = pandora_sdk.HandPlacer("right")
+
+    on = placer.update(0.0, tracker, (0.0, 0.0, 0.0), offset)
+    held = placer.update(0.1, None, (0.0, 0.0, 0.0), offset)
+
+    assert on == pandora_sdk.Placement(pandora_sdk.place_on_tracker(tracker, offset), "tracked")
+    assert held.state == pandora_sdk.PlacementState.IMU_HOLD and held.root == on.root
+    assert len(pandora_sdk.bones_in_world(on.root, [(0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0)] * 31)) == 31
+
+
 def test_the_latest_calibration_is_the_one_in_use_now(calibrated):
     assert calibrated.latest_calibration(RIGHT) == calibrated.calibration(RIGHT)
     assert calibrated.latest_calibration(STRANGER) is None

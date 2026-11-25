@@ -40,6 +40,7 @@ RUNTIME_TO_SDK = {
     "stop": ("stop_reading",),
     "stop_haptics": ("stop_haptics", "stop"),
     "subscribe": ("subscribe",),
+    "tracker_offset": ("tracker_offset",),
     "unprofiled": ("unprofiled",),
     "uses_glove_profile": ("uses_glove_profile",),
     "want_lines": ("on_line",),

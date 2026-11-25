@@ -15,8 +15,10 @@ same commands for a glove (haptics, Hall range) and give its Calibration;
 what they hold is in PROTOCOL.md (attached to each release of pandora-sdk).
 """
 from pandora_core_rs.glove import Profile
+from pandora_core_rs.placement import (HandPlacer, Placement, PlacementState, bones_in_world,
+                                       place_on_tracker, tracker_offset_pose)
 from pandora_core_rs.protocol import (DEFAULT_PORT, Calibration, Debug, Device, Frame,
-                                      ProtocolError, Raw, Subscription)
+                                      ProtocolError, Raw, Subscription, TrackerMount)
 from pandora_core_rs.receiver import ReceiverPort
 
 from pandora_sdk.client import Client, Server, connect
@@ -26,7 +28,9 @@ from pandora_sdk.source import (CONNECTION_FAILED_CODES, DISCONNECTED_CODES, Con
                                 Disconnected, PandoraError, ServerError, Source)
 
 __all__ = ["CONNECTION_FAILED_CODES", "DEFAULT_PORT", "DISCONNECTED_CODES", "Calibration",
-           "Client", "ConnectionFailed", "Debug", "Device", "Disconnected", "Frame", "Local",
-           "PandoraError", "Profile", "ProtocolError", "Raw", "ReceiverPort", "Server",
-           "ServerError", "Source", "Subscription", "connect", "default_profiles_dir",
-           "list_receivers", "load_profiles", "open_link", "open_receiver", "save_profile"]
+           "Client", "ConnectionFailed", "Debug", "Device", "Disconnected", "Frame", "HandPlacer",
+           "Local", "PandoraError", "Placement", "PlacementState", "Profile", "ProtocolError",
+           "Raw", "ReceiverPort", "Server", "ServerError", "Source", "Subscription",
+           "TrackerMount", "bones_in_world", "connect", "default_profiles_dir", "list_receivers",
+           "load_profiles", "open_link", "open_receiver", "place_on_tracker", "save_profile",
+           "tracker_offset_pose"]
